@@ -25,12 +25,45 @@ The server stores the same fields the current PWA uses:
   "currency": "AUD",
   "category": "Materials",
   "payment_method": "Visa …1234",
-  "items": [{ "description": "Cable ties", "amount": 12.50 }],
+  "items": [{
+    "id": "3f9a2c17",
+    "description": "Cable ties",
+    "amount": 12.50,
+    "qty": null,
+    "category": null,
+    "excluded": false,
+    "source": "extract"
+  }],
   "notes": null
 }
 ```
 
 `items` is stored as JSON. Amount fields may be `null` when unreadable.
+
+### Line items
+
+The item shape is defined once in `receipts/items.py` and mirrored in
+`receipts/app.js`. Beyond `description` and `amount` (what the model
+extracts), each item carries:
+
+- `id` — stable, assigned on first store. Items are addressed as
+  `<receipt-id>:<item-id>`, called a **ref**.
+- `qty` — quantity when one was read, else `null`.
+- `category` — `null` means "same as the receipt". An item only gets its own
+  category once someone splits it out (e.g. a Home Building line on a
+  Materials receipt).
+- `excluded` — a junk line (loyalty, subtotal, rounding) kept on the record
+  but left out of item totals. Cleanup excludes lines, never deletes them.
+- `source` — `extract` (model), `notes` (backfilled from an `item:` note
+  line), `manual`.
+
+Older payloads with plain `{description, amount}` items are still accepted:
+the server matches them against what it already has (by id, else by
+description + amount) and **carries the stored category/exclusion forward**,
+so a client that doesn't know about item review can't wipe it.
+
+Amounts are never edited — they are what the docket says. Descriptions,
+categories and exclusions are the editable part.
 
 ## Categories
 
@@ -136,6 +169,109 @@ Returns:
 { "extraction": { "is_receipt": true, "merchant": "...", ... } }
 ```
 
+### List items
+
+```http
+GET /receipts/items
+GET /receipts/items?from=2026-07-01&to=2026-07-31&uncategorised=1
+GET /receipts/items?item_q=conduit&category=Materials&include_excluded=1
+```
+
+Returns a flat list of item rows, each carrying its receipt's context:
+
+```json
+{ "items": [{
+  "ref": "b1f0…:3f9a2c17", "receipt_id": "b1f0…", "item_id": "3f9a2c17",
+  "date": "2026-07-09", "merchant": "Bunnings", "currency": "AUD",
+  "receipt_category": "Materials", "description": "Cable ties", "amount": 12.5,
+  "qty": null, "category": null, "effective_category": "Materials",
+  "excluded": false, "source": "extract"
+}] }
+```
+
+Receipt-level filters (`from`, `to`, `fy`) narrow the receipts first. The
+item-level ones are:
+
+| Param | Effect |
+| --- | --- |
+| `item_q` (or `q`) | matches the item description, merchant, category or date |
+| `category` | effective category — the item's own, else its receipt's |
+| `item_category` | only items explicitly filed under that category |
+| `merchant` | substring match |
+| `uncategorised=1` | only items with no category of their own |
+| `missing_amount=1` | only items whose amount wasn't read |
+| `source=extract\|notes\|manual` | where the item came from |
+| `include_excluded=1` | include ignored junk lines (hidden by default) |
+| `excluded=1` | *only* ignored junk lines |
+
+### Item summary
+
+```http
+GET /receipts/items/summary?fy=current
+```
+
+Item counts and amounts by category, merchant and month, plus `coverage`:
+which receipts have no items at all, and which ones whose items don't add up
+to the receipt total (more than 5c out). Excluded lines are counted and
+reported but never totalled. Includes the standard
+`"Review AI-extracted amounts before lodging."` note.
+
+### Export items CSV
+
+```http
+GET /receipts/items/export.csv
+```
+
+Same filters as `GET /receipts/items`. Columns: `date, merchant,
+description, qty, amount, currency, item_category, receipt_category,
+excluded, source, receipt_id, item_id`.
+
+### Update items
+
+```http
+POST /receipts/items/update
+Content-Type: application/json
+```
+
+One edit, or a batch:
+
+```json
+{ "ref": "b1f0…:3f9a2c17", "category": "Tools", "excluded": false }
+{ "updates": [{ "ref": "…", "category": "Fuel" }, { "ref": "…", "excluded": true }] }
+```
+
+`receipt_id` + `item_id` work in place of `ref`. Editable keys are
+`category` (`null` clears it back to "same as the receipt"), `excluded` and
+`description` — amounts are not editable. Returns the updated item rows and
+anything that couldn't be found:
+
+```json
+{ "updated": [ { …item row… } ], "failed": [] }
+```
+
+Responds `404` when nothing matched. Items have no delete endpoint: junk
+lines are excluded, which keeps the stored record faithful to the docket.
+
+### Backfill items from notes
+
+```http
+POST /receipts/items/backfill
+Content-Type: application/json
+```
+
+Receipts captured before itemisation sometimes carry their lines in the
+notes as `item:` / `items:` lines. This lifts them into real items (with
+`source: "notes"`), skipping any that are already itemised.
+
+```json
+{ "apply": false, "receipt_id": null, "strip_notes": false }
+```
+
+**Dry run by default** — nothing is written unless `apply` is true. With
+`strip_notes` the note lines the items came from are removed as well; notes
+that produced no items are always left alone. Returns the per-receipt
+changes, plus `receipts` / `items` counts.
+
 ### Delete receipt
 
 ```http
@@ -192,7 +328,7 @@ Tax/BAS-facing answers should include: **Review AI-extracted amounts before lodg
 
 ## Extraction contract
 
-Server-side receipt image extraction must reuse from `receipts/app.js`:
+Server-side receipt image extraction must reuse from `receipts/contract.py`:
 
 - `RECEIPT_SCHEMA`
 - `PROMPT`

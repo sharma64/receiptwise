@@ -37,6 +37,7 @@ document.querySelectorAll('.tab').forEach((tab) => {
     document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t === tab));
     window.scrollTo(0, 0);
     if (go === 'list') renderList();
+    if (go === 'items') renderItems();
     if (go === 'totals') renderTotals();
     if (go === 'scan') refreshServerUi();
   });
@@ -361,6 +362,60 @@ async function extractReceipt(imageDataUrl) {
   }
 }
 
+// ---- line items --------------------------------------------------
+// Same stored shape as receipts/items.py — keep the two in lockstep.
+// `category: null` means "same as the receipt"; `excluded` is a junk line
+// (loyalty, subtotal) kept on the record but left out of item totals.
+const newItemId = () => crypto.randomUUID().replace(/-/g, '').slice(0, 8);
+
+function normaliseItem(raw, source = 'extract') {
+  if (typeof raw === 'string') raw = { description: raw };
+  if (!raw || typeof raw !== 'object') return null;
+  const description = String(raw.description ?? '').trim();
+  const amount = Number.isFinite(Number(raw.amount)) && raw.amount !== null && raw.amount !== ''
+    ? Number(raw.amount) : null;
+  if (!description && amount === null) return null;
+  return {
+    id: String(raw.id || '') || newItemId(),
+    description: description || 'Unnamed item',
+    amount,
+    qty: Number.isFinite(Number(raw.qty)) && raw.qty !== null && raw.qty !== '' ? Number(raw.qty) : null,
+    category: CATEGORIES.includes(raw.category) ? raw.category : null,
+    excluded: !!raw.excluded,
+    source: ['extract', 'notes', 'manual'].includes(raw.source) ? raw.source : source,
+  };
+}
+
+const normaliseItems = (list, source) =>
+  (Array.isArray(list) ? list : []).map((i) => normaliseItem(i, source)).filter(Boolean);
+
+// Flatten receipts into item rows carrying their receipt's context.
+function itemRows(receipts) {
+  const rows = [];
+  for (const r of receipts) {
+    for (const item of normaliseItems(r.items)) {
+      rows.push({
+        ref: `${r.id}:${item.id}`,
+        receiptId: r.id,
+        itemId: item.id,
+        date: r.date,
+        merchant: r.merchant,
+        currency: r.currency || 'AUD',
+        receiptCategory: r.category || 'Other',
+        description: item.description,
+        amount: item.amount,
+        qty: item.qty,
+        category: item.category,
+        effectiveCategory: item.category || r.category || 'Other',
+        excluded: item.excluded,
+        source: item.source,
+      });
+    }
+  }
+  return rows.sort((a, b) => (b.date || '').localeCompare(a.date || '') ||
+    (a.merchant || '').localeCompare(b.merchant || ''));
+}
+
 // ---- scan flow ---------------------------------------------------
 $('btn-camera').addEventListener('click', () => {
   $('file-input').setAttribute('capture', 'environment');
@@ -414,7 +469,7 @@ $('file-input').addEventListener('change', async (e) => {
         currency: data.currency || 'AUD',
         category: CATEGORIES.includes(data.category) ? data.category : 'Other',
         payment_method: data.payment_method,
-        items: data.items || [],
+        items: normaliseItems(data.items),
         notes: data.notes,
         _dirty: true,
       };
@@ -443,6 +498,16 @@ let currentView = [];
 
 async function refreshCache() {
   cache = await dbAll();
+  // Give older locally-cached receipts the current item shape (stable item
+  // ids above all — edits address items by id). The server reconciles its own
+  // ids on the next pull.
+  for (const r of cache) {
+    const list = normaliseItems(r.items);
+    if (JSON.stringify(list) !== JSON.stringify(r.items ?? [])) {
+      r.items = list;
+      await dbPut(r);
+    }
+  }
   // newest date first; undated last
   cache.sort((a, b) => (b.date || '').localeCompare(a.date || ''));
 }
@@ -514,11 +579,27 @@ function openDetail(id) {
     `<option${c === editing.category ? ' selected' : ''}>${c}</option>`).join('');
   $('d-payment').value = editing.payment_method || '';
   $('d-notes').value = editing.notes || '';
-  $('d-items').innerHTML = (editing.items || []).map((i) =>
-    `<div class="d-item"><span>${esc(i.description)}</span><span>${Number.isFinite(i.amount) ? money(i.amount, editing.currency) : ''}</span></div>`
-  ).join('');
+  renderDetailItems();
   $('detail').showModal();
 }
+
+// Items on the open receipt: tap one to categorise it or ignore a junk line.
+function renderDetailItems() {
+  if (!editing) return;
+  const rows = itemRows([editing]);
+  $('d-items').innerHTML = rows.length
+    ? rows.map((row) => `
+        <div class="d-item${row.excluded ? ' ignored' : ''}" data-ref="${row.ref}">
+          <span>${esc(row.description)} ${categoryChip(row)}</span>
+          <span>${row.amount === null ? '' : money(row.amount, row.currency)}</span>
+        </div>`).join('')
+    : '<p class="r-empty">No line items on this receipt.</p>';
+}
+
+$('d-items').addEventListener('click', (e) => {
+  const row = e.target.closest('.d-item');
+  if (row) openItemDetail(row.dataset.ref);
+});
 
 // Extracted fields are locked — only category and notes can be changed.
 $('d-save').addEventListener('click', async () => {
@@ -545,6 +626,148 @@ $('d-delete').addEventListener('click', async () => {
 });
 
 $('d-close').addEventListener('click', () => $('detail').close());
+
+// ---- items screen --------------------------------------------------
+// A bare chip is the item's own category; a bracketed one is inherited from
+// the receipt, i.e. nobody has looked at this line yet.
+const categoryChip = (row) => row.category
+  ? `<span class="chip">${esc(row.category)}</span>`
+  : `<span class="chip inherit">(${esc(row.receiptCategory)})</span>`;
+
+let itemView = [];   // rows currently shown
+
+const findItemRow = (ref) => itemRows(cache).find((r) => r.ref === ref);
+
+async function renderItems() {
+  await refreshCache();
+  const rows = itemRows(cache);
+  const months = [...new Set(rows.map((r) => monthKey(r.date)))];
+  fillSelect($('iflt-month'), months, $('iflt-month').value, monthLabel);
+  fillSelect($('iflt-cat'), CATEGORIES.filter((c) => rows.some((r) => r.effectiveCategory === c)), $('iflt-cat').value);
+  if (!$('bulk-cat').options.length) {
+    $('bulk-cat').innerHTML = '<option value="">Same as the receipt</option>' +
+      CATEGORIES.map((c) => `<option value="${esc(c)}">${esc(c)}</option>`).join('');
+  }
+
+  const q = $('iflt-search').value.trim().toLowerCase();
+  const m = $('iflt-month').value;
+  const c = $('iflt-cat').value;
+  const view = $('iflt-view').value;
+
+  itemView = rows.filter((r) => {
+    if (view === 'ignored' ? !r.excluded : r.excluded) return false;
+    if (view === 'review' && r.category !== null) return false;
+    if (view === 'noamount' && r.amount !== null) return false;
+    if (m && monthKey(r.date) !== m) return false;
+    if (c && r.effectiveCategory !== c) return false;
+    if (q && ![r.description, r.merchant, r.effectiveCategory, r.date].join(' ').toLowerCase().includes(q)) return false;
+    return true;
+  });
+
+  const counted = itemView.filter((r) => !r.excluded);
+  const total = counted.reduce((sum, r) => sum + (r.amount ?? 0), 0);
+  const toReview = rows.filter((r) => !r.excluded && r.category === null).length;
+  $('items-count').textContent = rows.length
+    ? `${itemView.length} of ${rows.length} items · ${money(total)}` +
+      (toReview ? ` · ${toReview} still need a category` : ' · all categorised')
+    : 'No items yet — they arrive with each scanned receipt.';
+
+  // Bulk categorising is only offered on a narrowed view, so a stray tap
+  // can't recategorise everything at once.
+  const narrowed = !!(q || m || c || view !== 'all');
+  $('items-bulk').hidden = !(narrowed && itemView.length);
+  $('bulk-count').textContent = itemView.length;
+
+  $('item-list').innerHTML = itemView.length
+    ? itemView.map((r) => `
+        <div class="i-row${r.excluded ? ' ignored' : ''}" data-ref="${r.ref}">
+          <div class="i-main">
+            <div class="i-desc">${r.qty ? `${r.qty}× ` : ''}${esc(r.description)}</div>
+            <div class="i-meta">${esc(r.date || 'no date')} · ${esc(r.merchant)} ${categoryChip(r)}</div>
+          </div>
+          <div class="i-amt">${r.amount === null ? '—' : money(r.amount, r.currency)}</div>
+        </div>`).join('')
+    : '<p class="r-empty">Nothing matches the current filters.</p>';
+}
+
+['iflt-search', 'iflt-month', 'iflt-cat', 'iflt-view'].forEach((id) =>
+  $(id).addEventListener('input', () => renderItems()));
+
+$('item-list').addEventListener('click', (e) => {
+  const row = e.target.closest('.i-row');
+  if (row) openItemDetail(row.dataset.ref);
+});
+
+// Apply changes to items in place, grouped so each receipt is written once.
+async function editItems(refs, changes) {
+  const byReceipt = new Map();
+  for (const ref of refs) {
+    const [receiptId, itemId] = ref.split(':');
+    byReceipt.set(receiptId, [...(byReceipt.get(receiptId) || []), itemId]);
+  }
+  let changed = 0;
+  for (const [receiptId, itemIds] of byReceipt) {
+    const receipt = cache.find((r) => r.id === receiptId);
+    if (!receipt) continue;
+    const list = normaliseItems(receipt.items);
+    for (const item of list) {
+      if (!itemIds.includes(item.id)) continue;
+      if ('category' in changes) item.category = CATEGORIES.includes(changes.category) ? changes.category : null;
+      if ('excluded' in changes) item.excluded = !!changes.excluded;
+      changed++;
+    }
+    receipt.items = list;
+    receipt._dirty = true;
+    await dbPut(receipt);
+  }
+  if (changed) syncSoon();
+  return changed;
+}
+
+$('btn-bulk-apply').addEventListener('click', async () => {
+  const refs = itemView.map((r) => r.ref);
+  const category = $('bulk-cat').value;
+  const label = category || 'the same category as their receipt';
+  if (!refs.length) return;
+  if (!confirm(`Set ${refs.length} item${refs.length > 1 ? 's' : ''} to ${label}?`)) return;
+  const changed = await editItems(refs, { category });
+  await renderItems();
+  show('bulk-status', `${changed} item${changed === 1 ? '' : 's'} set to ${esc(label)}.`, 'ok');
+});
+
+// ---- item detail / edit ---------------------------------------------
+let editingItem = null;
+
+function openItemDetail(ref) {
+  const row = findItemRow(ref);
+  if (!row) return;
+  editingItem = row;
+  $('i-desc').textContent = row.description;
+  $('i-meta').textContent = `${row.date || 'no date'} · ${row.merchant} · from the ${row.receiptCategory} receipt`;
+  $('i-amount').value = row.amount === null ? 'not read' : money(row.amount, row.currency);
+  $('i-cat').innerHTML = `<option value="">Same as the receipt (${esc(row.receiptCategory)})</option>` +
+    CATEGORIES.map((c) => `<option${c === row.category ? ' selected' : ''}>${esc(c)}</option>`).join('');
+  $('i-ignore').checked = row.excluded;
+  $('item-detail').showModal();
+}
+
+$('i-save').addEventListener('click', async () => {
+  if (!editingItem) return;
+  await editItems([editingItem.ref], { category: $('i-cat').value, excluded: $('i-ignore').checked });
+  $('item-detail').close();
+  await refreshCache();
+  if (editing) editing = cache.find((r) => r.id === editing.id) || editing;
+  renderDetailItems();
+  if (!$('items').hidden) renderItems();
+});
+
+$('i-open-receipt').addEventListener('click', () => {
+  const receiptId = editingItem?.receiptId;
+  $('item-detail').close();
+  if (receiptId) openDetail(receiptId);
+});
+
+$('i-close').addEventListener('click', () => $('item-detail').close());
 
 // ---- totals -------------------------------------------------------
 const sum = (arr, f) => arr.reduce((s, r) => s + (Number.isFinite(f(r)) ? f(r) : 0), 0);
@@ -646,6 +869,26 @@ function downloadCSV(rows, name) {
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 5000);
 }
+
+function itemsCSV(rows) {
+  const cols = ['date', 'merchant', 'description', 'qty', 'amount', 'currency',
+    'item_category', 'receipt_category', 'excluded', 'source', 'receipt_id', 'item_id'];
+  const cell = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+  return [cols.join(','), ...rows.map((r) => [
+    r.date, r.merchant, r.description, r.qty, r.amount, r.currency,
+    r.category || '', r.receiptCategory, r.excluded ? 'yes' : '', r.source, r.receiptId, r.itemId,
+  ].map(cell).join(','))].join('\r\n');
+}
+
+$('btn-export-items').addEventListener('click', () => {
+  if (!itemView.length) return alert('Nothing to export.');
+  const blob = new Blob(['\uFEFF' + itemsCSV(itemView)], { type: 'text/csv;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `receipt-items-${new Date().toISOString().slice(0, 10)}.csv`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+});
 
 $('btn-export').addEventListener('click', () =>
   downloadCSV(currentView, `receipts-${new Date().toISOString().slice(0, 10)}.csv`));

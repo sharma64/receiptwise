@@ -50,6 +50,23 @@ For tax/BAS-facing figures, include:
 
 > Review AI-extracted amounts before lodging.
 
+## Line items
+
+Item-level questions and clean-up go through the `receipt-items` wrapper —
+run it directly by path, never through a shell:
+
+```
+receipt-items review
+receipt-items list conduit
+receipt-items summary --fy current
+receipt-items categorise <receipt-id>:<item-id> Tools
+receipt-items ignore <receipt-id>:<item-id>
+receipt-items backfill-preview
+```
+
+Full runbook: `receipts/ITEMS.md`. Item amounts are never edited and items
+are never deleted — junk lines get `ignore`d instead.
+
 ## Deletion
 
 Never delete receipt records without explicit Sharma instruction.

@@ -43,6 +43,14 @@ Two intake paths, one store, for Sharma's own deployment:
    `~/.openclaw/workspace-ledger/bin/` (runbook:
    `~/.openclaw/workspace-ledger/RECEIPTS.md`).
 
+Line items live inside each receipt record (`items_json`), not in a
+separate table: shape, notes-backfill and review rules in `receipts/items.py`,
+runbook in `receipts/ITEMS.md`. Items are addressed as
+`<receipt-id>:<item-id>`; an item with no category of its own follows its
+receipt. Ledger's wrapper is `~/.openclaw/workspace-ledger/bin/receipt-items`
+(argv only — no shell, pipes or heredocs), backed by
+`receipts/receipt_items.py`.
+
 Source of truth: SQLite DB shared by both paths (path in
 `/etc/sparkkit-receipts.env`; currently inside Ledger's clone at
 `~/.openclaw/workspace/_external/sparkkit/receipts/`). The PWA's IndexedDB
@@ -60,6 +68,9 @@ is an offline cache that reconciles on sync. Deployment: `deploy/DEPLOY.md`.
 - Never commit: the SQLite DB, tokens/keys, downloaded receipt images.
 - Deletion of receipt records always requires Sharma's explicit approval,
   one receipt at a time (see the safe-delete wrappers).
+- Line items are reviewed, never rewritten: amounts stay as extracted, and
+  junk lines (loyalty, subtotals) are *excluded* from totals rather than
+  deleted. There is deliberately no item-delete path.
 - Tax/BAS-facing output must include: "Review AI-extracted amounts before
   lodging."
 - `main` is protected (no force pushes, no deletion). Work on branches,
@@ -70,5 +81,5 @@ is an offline cache that reconciles on sync. Deployment: `deploy/DEPLOY.md`.
 - Python: `python3 -m py_compile receipts/*.py`, then smoke-test
   `server.py` with curl (`/health`, `/receipts/upsert`, `/receipts`).
 - PWA: `python3 -m http.server` from the repo root, exercise scan/list/
-  sync manually. Bump the `CACHE` version in `sw.js` whenever app-shell
-  files change.
+  items/sync manually. Bump the `CACHE` version in `sw.js` whenever
+  app-shell files change.

@@ -1,7 +1,7 @@
 // Offline cache for the app shell (same pattern as the main SparkKit sw.js).
 // Network-first so updates land immediately; cache fallback for offline.
 // API calls to api.anthropic.com are never cached (cross-origin, and POST anyway).
-const CACHE = 'sparkkit-receipts-v5';
+const CACHE = 'sparkkit-receipts-v6';
 const ASSETS = [
   './',
   './index.html',

@@ -11,6 +11,12 @@ Examples:
   # Ask data questions via deterministic summaries
   python3 receipts/receipt_cli.py summary --fy current
   python3 receipts/receipt_cli.py list --q bunnings
+
+  # Work on line items: review, clean up, categorise
+  python3 receipts/receipt_cli.py items list --uncategorised
+  python3 receipts/receipt_cli.py items set-category <receipt-id>:<item-id> Tools
+  python3 receipts/receipt_cli.py items backfill            # dry run
+  python3 receipts/receipt_cli.py items backfill --apply
 """
 
 from __future__ import annotations
@@ -26,10 +32,11 @@ from pathlib import Path
 import requests
 
 try:
+    import items
     import server
     from contract import CATEGORIES, PROMPT, RECEIPT_SCHEMA
 except ImportError:  # pragma: no cover
-    from . import server
+    from . import items, server
     from .contract import CATEGORIES, PROMPT, RECEIPT_SCHEMA
 
 
@@ -202,6 +209,117 @@ def cmd_summary(args):
     print(json.dumps(server.summary(server.list_receipts(params)), indent=2, ensure_ascii=False))
 
 
+# ---- items ---------------------------------------------------------------
+
+def item_params(args) -> dict:
+    """Query params for the item helpers, in the shape server.list_item_rows wants."""
+    params = {}
+    for key, value in (
+        ("from", args.from_date), ("to", args.to_date), ("category", args.category),
+        ("fy", args.fy), ("item_q", args.q), ("item_category", args.item_category),
+        ("merchant", args.merchant), ("source", args.source),
+    ):
+        if value:
+            params[key] = [value]
+    for key, flag in (
+        ("uncategorised", args.uncategorised), ("missing_amount", args.missing_amount),
+        ("include_excluded", args.include_excluded), ("excluded", args.excluded),
+    ):
+        if flag:
+            params[key] = ["1"]
+    return params
+
+
+def item_line(row: dict) -> str:
+    amount = "-" if row["amount"] is None else f"{row['currency']} {row['amount']:.2f}"
+    qty = f"{row['qty']:g}x " if row["qty"] else ""
+    # A bare category is the item's own; brackets mean it inherits the receipt's.
+    category = row["category"] or f"({row['receipt_category']})"
+    flag = " [ignored]" if row["excluded"] else ""
+    return (f"{row['date'] or 'no date'} | {row['merchant']} | {amount} | {category} | "
+            f"{qty}{row['description']}{flag} | {row['ref']}")
+
+
+def cmd_items_list(args):
+    server.init_db()
+    rows, _ = server.list_item_rows(item_params(args))
+    if args.limit:
+        rows = rows[:args.limit]
+    if args.json:
+        print(json.dumps({"items": rows}, indent=2, ensure_ascii=False))
+        return
+    for row in rows:
+        print(item_line(row))
+    counted = [r for r in rows if not r["excluded"]]
+    total = sum(r["amount"] or 0 for r in counted)
+    print(f"{len(rows)} items · {len(counted)} counted · AUD {total:.2f}")
+
+
+def cmd_items_summary(args):
+    server.init_db()
+    params = {**item_params(args), "include_excluded": ["1"]}
+    rows, records = server.list_item_rows(params)
+    print(json.dumps(items.summary(rows, records), indent=2, ensure_ascii=False))
+
+
+def cmd_items_export_csv(args):
+    server.init_db()
+    rows, _ = server.list_item_rows(item_params(args))
+    print(items.csv_from_rows(rows), end="")
+
+
+def edit_one(ref: str, **changes) -> int:
+    server.init_db()
+    try:
+        receipt_id, item_id = items.parse_ref(ref)
+    except ValueError as e:
+        raise SystemExit(str(e))
+    row = server.edit_item(receipt_id, item_id, **changes)
+    if not row:
+        print(f"No item found for {ref}", file=sys.stderr)
+        return 1
+    print(item_line(row))
+    return 0
+
+
+def cmd_items_set_category(args):
+    if args.category_name not in CATEGORIES and args.category_name.lower() not in {"none", "inherit", "-"}:
+        raise SystemExit(f"Unknown category {args.category_name!r}. One of: {', '.join(CATEGORIES)}")
+    value = None if args.category_name.lower() in {"none", "inherit", "-"} else args.category_name
+    return edit_one(args.ref, category=value)
+
+
+def cmd_items_describe(args):
+    return edit_one(args.ref, description=args.text)
+
+
+def cmd_items_exclude(args):
+    return edit_one(args.ref, excluded=True)
+
+
+def cmd_items_include(args):
+    return edit_one(args.ref, excluded=False)
+
+
+def cmd_items_backfill(args):
+    server.init_db()
+    result = server.backfill_notes(apply=args.apply, receipt_id=args.receipt,
+                                   strip_notes=args.strip_notes)
+    if args.json:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+    for change in result["changes"]:
+        print(f"{change['date'] or 'no date'} | {change['merchant']} | {change['receipt_id']}")
+        for item in change["added"]:
+            amount = "-" if item["amount"] is None else f"{item['amount']:.2f}"
+            print(f"    + {item['description']} · {amount}")
+        if change["duplicates"]:
+            print(f"    ({change['duplicates']} already itemised, skipped)")
+    verb = "Added" if result["applied"] else "Would add"
+    print(f"{verb} {result['items']} items across {result['receipts']} receipts"
+          + ("" if result["applied"] else " — re-run with --apply to write."))
+
+
 def build_parser():
     p = argparse.ArgumentParser(description="SparkKit Receipts chat/CLI intake")
     sub = p.add_subparsers(required=True)
@@ -243,13 +361,64 @@ def build_parser():
     s = sub.add_parser("summary")
     add_filters(s)
     s.set_defaults(func=cmd_summary)
+
+    def add_item_filters(s):
+        add_filters(s)
+        s.add_argument("--item-category", help="items explicitly filed under this category")
+        s.add_argument("--merchant")
+        s.add_argument("--source", choices=list(items.ITEM_SOURCES))
+        s.add_argument("--uncategorised", action="store_true", help="items still inheriting their receipt's category")
+        s.add_argument("--missing-amount", action="store_true", dest="missing_amount")
+        s.add_argument("--include-excluded", action="store_true", dest="include_excluded")
+        s.add_argument("--excluded", action="store_true", help="only ignored junk lines")
+
+    it = sub.add_parser("items", help="review, clean up and categorise line items").add_subparsers(required=True)
+
+    s = it.add_parser("list")
+    add_item_filters(s)
+    s.add_argument("--limit", type=int)
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_items_list)
+
+    s = it.add_parser("summary")
+    add_item_filters(s)
+    s.set_defaults(func=cmd_items_summary)
+
+    s = it.add_parser("export-csv")
+    add_item_filters(s)
+    s.set_defaults(func=cmd_items_export_csv)
+
+    s = it.add_parser("set-category", help="categorise one item ('inherit' clears it)")
+    s.add_argument("ref", help="<receipt-id>:<item-id>")
+    s.add_argument("category_name", metavar="category")
+    s.set_defaults(func=cmd_items_set_category)
+
+    s = it.add_parser("describe", help="fix an item's description (amounts stay as extracted)")
+    s.add_argument("ref")
+    s.add_argument("text")
+    s.set_defaults(func=cmd_items_describe)
+
+    s = it.add_parser("exclude", help="mark a junk line (loyalty, subtotal) out of item totals")
+    s.add_argument("ref")
+    s.set_defaults(func=cmd_items_exclude)
+
+    s = it.add_parser("include", help="undo exclude")
+    s.add_argument("ref")
+    s.set_defaults(func=cmd_items_include)
+
+    s = it.add_parser("backfill", help="lift `item:` / `items:` note lines into real items")
+    s.add_argument("--receipt", help="one receipt id (default: every receipt)")
+    s.add_argument("--apply", action="store_true", help="write the changes (default: dry run)")
+    s.add_argument("--strip-notes", action="store_true", dest="strip_notes",
+                   help="also remove the note lines the items came from")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_items_backfill)
     return p
 
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
-    args.func(args)
-    return 0
+    return args.func(args) or 0
 
 
 if __name__ == "__main__":

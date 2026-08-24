@@ -43,9 +43,13 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 try:
+    import items
     from contract import CATEGORIES, PROMPT, PROMPT_INLINE_SCHEMA, RECEIPT_SCHEMA
 except ImportError:  # pragma: no cover - package-style import fallback
+    from . import items
     from .contract import CATEGORIES, PROMPT, PROMPT_INLINE_SCHEMA, RECEIPT_SCHEMA
+
+parse_amount = items.parse_amount
 
 CSV_COLUMNS = ["date", "merchant", "category", "total", "gst", "currency", "payment_method", "items", "notes"]
 RECORD_FIELDS = ["id", "added", "thumb", *CSV_COLUMNS]
@@ -120,30 +124,7 @@ def init_db() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_receipts_merchant ON receipts(merchant)")
 
 
-def parse_amount(value):
-    if value in (None, ""):
-        return None
-    try:
-        return float(str(value).replace("$", "").replace(",", "").strip())
-    except ValueError:
-        return None
-
-
-def normalise_items(value):
-    if value in (None, ""):
-        return []
-    if isinstance(value, list):
-        return value
-    if isinstance(value, str):
-        try:
-            parsed = json.loads(value)
-            return parsed if isinstance(parsed, list) else []
-        except json.JSONDecodeError:
-            return []
-    return []
-
-
-def normalise_record(raw: dict, *, importing: bool = False) -> dict:
+def normalise_record(raw: dict, *, previous_items=None) -> dict:
     category = raw.get("category") or "Other"
     if category not in CATEGORIES:
         category = "Other"
@@ -158,7 +139,7 @@ def normalise_record(raw: dict, *, importing: bool = False) -> dict:
         "currency": raw.get("currency") or "AUD",
         "category": category,
         "payment_method": raw.get("payment_method") or None,
-        "items": normalise_items(raw.get("items")),
+        "items": items.normalise_items(raw.get("items"), previous=previous_items),
         "notes": raw.get("notes") or None,
     }
 
@@ -175,13 +156,23 @@ def row_to_record(row: sqlite3.Row) -> dict:
         "currency": row["currency"],
         "category": row["category"],
         "payment_method": row["payment_method"],
-        "items": json.loads(row["items_json"] or "[]"),
+        "items": items.normalise_items(row["items_json"]),
         "notes": row["notes"],
     }
 
 
+def stored_items(receipt_id: str) -> list[dict]:
+    if not receipt_id:
+        return []
+    with db() as conn:
+        row = conn.execute("SELECT items_json FROM receipts WHERE id = ?", (receipt_id,)).fetchone()
+    return items.normalise_items(row["items_json"]) if row else []
+
+
 def upsert_record(record: dict) -> dict:
-    r = normalise_record(record)
+    # Item categories and exclusions live on the server; a client that only
+    # sends {description, amount} back must not wipe them (see items.py).
+    r = normalise_record(record, previous_items=stored_items(record.get("id") or ""))
     with db() as conn:
         conn.execute(
             """
@@ -354,6 +345,133 @@ def list_receipts(params: dict[str, list[str]]) -> list[dict]:
     return records
 
 
+def truthy(params: dict[str, list[str]], key: str) -> bool:
+    return params.get(key, [""])[0].strip().lower() in {"1", "true", "yes", "on"}
+
+
+def item_filters(params: dict[str, list[str]]) -> dict:
+    """Item-level filters from the query string (receipt-level ones are
+    applied first by list_receipts)."""
+    return {
+        "q": params.get("item_q", params.get("q", [""]))[0].strip(),
+        "category": params.get("category", [""])[0].strip() or None,
+        "item_category": params.get("item_category", [""])[0].strip() or None,
+        "merchant": params.get("merchant", [""])[0].strip() or None,
+        "uncategorised": truthy(params, "uncategorised"),
+        "missing_amount": truthy(params, "missing_amount"),
+        "source": params.get("source", [""])[0].strip() or None,
+        "include_excluded": truthy(params, "include_excluded"),
+        "only_excluded": truthy(params, "excluded"),
+    }
+
+
+def list_item_rows(params: dict[str, list[str]]) -> tuple[list[dict], list[dict]]:
+    """(matching item rows, the receipts they came from)."""
+    # `q` and `category` are applied to the item rows, not the receipts: an
+    # item search shouldn't be narrowed to receipts whose merchant matches, and
+    # an item filed under Tools on a Materials receipt is a Tools item.
+    receipt_params = {k: v for k, v in params.items() if k not in ("q", "category")}
+    records = list_receipts(receipt_params)
+    return items.filter_rows(items.item_rows(records), **item_filters(params)), records
+
+
+def edit_item(receipt_id: str, item_id: str, **changes) -> dict | None:
+    """Apply one item edit in place. None when the receipt or item is unknown."""
+    with db() as conn:
+        row = conn.execute("SELECT * FROM receipts WHERE id = ?", (receipt_id,)).fetchone()
+        if not row:
+            return None
+        record = row_to_record(row)
+        updated, edited = items.apply_item_edit(record["items"], item_id, **changes)
+        if not edited:
+            return None
+        conn.execute(
+            "UPDATE receipts SET items_json = ?, updated_at = ? WHERE id = ?",
+            (json.dumps(updated, ensure_ascii=False), now_iso(), receipt_id),
+        )
+    record["items"] = updated
+    return next((r for r in items.item_rows([record]) if r["item_id"] == item_id), None)
+
+
+def update_items(payload: dict) -> dict:
+    """Apply a single edit or a list of them ({updates: [...]})."""
+    requested = payload.get("updates") if isinstance(payload.get("updates"), list) else [payload]
+    updated, missing = [], []
+    for entry in requested:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            receipt_id, item_id = (
+                items.parse_ref(entry["ref"]) if entry.get("ref")
+                else (str(entry.get("receipt_id") or ""), str(entry.get("item_id") or ""))
+            )
+        except ValueError as e:
+            missing.append({"ref": entry.get("ref"), "error": str(e)})
+            continue
+        changes = {k: entry[k] for k in ("category", "excluded", "description") if k in entry}
+        if not receipt_id or not item_id or not changes:
+            missing.append({"ref": f"{receipt_id}:{item_id}", "error": "nothing to update"})
+            continue
+        row = edit_item(receipt_id, item_id, **changes)
+        (updated if row else missing).append(row or {"ref": f"{receipt_id}:{item_id}", "error": "not found"})
+    return {"updated": updated, "failed": missing}
+
+
+def backfill_notes(*, apply: bool = False, receipt_id: str | None = None,
+                   strip_notes: bool = False) -> dict:
+    """Lift `item:` / `items:` lines out of receipt notes into real items.
+
+    Dry run by default: nothing is written unless apply=True.
+    """
+    with db() as conn:
+        sql = "SELECT * FROM receipts"
+        args: list = []
+        if receipt_id:
+            sql += " WHERE id = ?"
+            args.append(receipt_id)
+        records = [row_to_record(row) for row in conn.execute(sql, args)]
+    changes = []
+    for record in records:
+        found, remaining = items.parse_notes_items(record["notes"])
+        if not found:
+            continue
+        existing = items.normalise_items(record["items"])
+        seen = {items.match_key(i) for i in existing}
+        added = []
+        for item in found:
+            key = items.match_key(item)
+            if key in seen:
+                continue
+            seen.add(key)
+            added.append(item)
+        notes_after = remaining if strip_notes else record["notes"]
+        if not added and notes_after == record["notes"]:
+            continue
+        changes.append({
+            "receipt_id": record["id"],
+            "date": record["date"],
+            "merchant": record["merchant"],
+            "added": added,
+            "duplicates": len(found) - len(added),
+            "notes_before": record["notes"],
+            "notes_after": notes_after,
+        })
+        if apply:
+            with db() as conn:
+                conn.execute(
+                    "UPDATE receipts SET items_json = ?, notes = ?, updated_at = ? WHERE id = ?",
+                    (json.dumps(existing + added, ensure_ascii=False), notes_after,
+                     now_iso(), record["id"]),
+                )
+    return {
+        "applied": apply,
+        "receipts": len(changes),
+        "items": sum(len(c["added"]) for c in changes),
+        "strip_notes": strip_notes,
+        "changes": changes,
+    }
+
+
 def csv_from_records(records: list[dict]) -> str:
     out = io.StringIO()
     writer = csv.DictWriter(out, fieldnames=CSV_COLUMNS, extrasaction="ignore")
@@ -495,6 +613,16 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_text(200, csv_from_records(list_receipts(params)), "text/csv; charset=utf-8")
         if parsed.path == "/receipts/summary":
             return self.send_json(200, summary(list_receipts(params)))
+        if parsed.path == "/receipts/items":
+            rows, _ = list_item_rows(params)
+            return self.send_json(200, {"items": rows})
+        if parsed.path == "/receipts/items/summary":
+            # Excluded lines are counted (and reported) here, just not totalled.
+            rows, records = list_item_rows({**params, "include_excluded": ["1"]})
+            return self.send_json(200, items.summary(rows, records))
+        if parsed.path == "/receipts/items/export.csv":
+            rows, _ = list_item_rows(params)
+            return self.send_text(200, items.csv_from_rows(rows), "text/csv; charset=utf-8")
         return self.send_json(404, {"error": "not found"})
 
     def do_POST(self):
@@ -512,6 +640,23 @@ class Handler(BaseHTTPRequestHandler):
             except json.JSONDecodeError:
                 return self.send_json(400, {"error": "invalid json"})
             return self.send_json(200, {"receipt": upsert_record(payload)})
+        if parsed.path == "/receipts/items/update":
+            try:
+                payload = json.loads(body.decode("utf-8"))
+            except json.JSONDecodeError:
+                return self.send_json(400, {"error": "invalid json"})
+            result = update_items(payload)
+            return self.send_json(200 if result["updated"] or not result["failed"] else 404, result)
+        if parsed.path == "/receipts/items/backfill":
+            try:
+                payload = json.loads(body.decode("utf-8")) if body else {}
+            except json.JSONDecodeError:
+                return self.send_json(400, {"error": "invalid json"})
+            return self.send_json(200, backfill_notes(
+                apply=bool(payload.get("apply")),
+                receipt_id=payload.get("receipt_id") or None,
+                strip_notes=bool(payload.get("strip_notes")),
+            ))
         if parsed.path == "/receipts/import-csv":
             return self.send_json(200, {"imported": import_csv(body.decode("utf-8-sig"))})
         if parsed.path == "/receipts/extract":
@@ -538,6 +683,8 @@ class Handler(BaseHTTPRequestHandler):
         prefix = "/receipts/"
         if parsed.path.startswith(prefix) and len(parsed.path) > len(prefix):
             rid = parsed.path[len(prefix):]
+            if rid == "items" or rid.startswith("items/"):
+                return self.send_json(405, {"error": "items are edited, not deleted — see /receipts/items/update"})
             with db() as conn:
                 cur = conn.execute("DELETE FROM receipts WHERE id = ?", (rid,))
             return self.send_json(200, {"deleted": cur.rowcount > 0, "id": rid})

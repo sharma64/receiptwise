@@ -60,6 +60,45 @@
       </div>
     </section>
 
+    <!-- ITEMS -->
+    <section class="screen" id="items" data-screen hidden>
+      <h1>Items</h1>
+      <p class="sub" id="items-count">No items yet.</p>
+      <div class="filters">
+        <input id="iflt-search" type="search" placeholder="Search item, merchant, category…" autocomplete="off" />
+        <div class="grid2">
+          <label>Month
+            <select id="iflt-month"><option value="">All</option></select>
+          </label>
+          <label>Category
+            <select id="iflt-cat"><option value="">All</option></select>
+          </label>
+          <label class="full">Show
+            <select id="iflt-view">
+              <option value="all">Everything counted</option>
+              <option value="review">Needs a category</option>
+              <option value="noamount">No amount read</option>
+              <option value="ignored">Ignored lines</option>
+            </select>
+          </label>
+        </div>
+      </div>
+      <div class="card" id="items-bulk" hidden>
+        <label class="full"><span class="bulk-head">Categorise all <b id="bulk-count">0</b> matching items as</span>
+          <select id="bulk-cat"></select>
+        </label>
+        <div class="row">
+          <button class="btn" id="btn-bulk-apply">Apply to these items</button>
+        </div>
+        <p class="result" id="bulk-status" aria-live="polite"></p>
+      </div>
+      <div id="item-list"></div>
+      <div class="row">
+        <button class="btn" id="btn-export-items">⬇ Export items CSV (current view)</button>
+      </div>
+      <p class="clause">An item with no category of its own follows its receipt — shown in brackets. Junk lines (loyalty, subtotals) are ignored rather than deleted, so the record still matches the docket.</p>
+    </section>
+
     <!-- TOTALS -->
     <section class="screen" id="totals" data-screen hidden>
       <h1>Totals</h1>
@@ -183,9 +222,38 @@
     </form>
   </dialog>
 
+  <!-- ITEM DETAIL / EDIT -->
+  <dialog id="item-detail">
+    <form method="dialog" class="detail-card">
+      <div class="detail-head">
+        <h2 class="section-h" id="i-desc" style="margin:0 40px 0 0"></h2>
+        <button type="button" class="close-x" id="i-close" aria-label="Close">✕</button>
+      </div>
+      <p class="sub" id="i-meta"></p>
+      <div class="grid2">
+        <!-- Description and amount are what the docket says; Ledger fixes misreads. -->
+        <label>Amount
+          <input id="i-amount" type="text" readonly tabindex="-1" />
+        </label>
+        <label>Category
+          <select id="i-cat"></select>
+        </label>
+        <label class="full check">
+          <input id="i-ignore" type="checkbox" />
+          <span>Ignore this line — leave it out of item totals</span>
+        </label>
+      </div>
+      <div class="row">
+        <button type="button" class="btn" id="i-save">Save</button>
+        <button type="button" class="btn ghost" id="i-open-receipt">Open receipt</button>
+      </div>
+    </form>
+  </dialog>
+
   <nav class="tabbar">
     <button class="tab active" data-go="scan"><span>📷</span>Scan</button>
     <button class="tab" data-go="list"><span>🧾</span>Receipts</button>
+    <button class="tab" data-go="items"><span>🔎</span>Items</button>
     <button class="tab" data-go="totals"><span>Σ</span>Totals</button>
     <button class="tab" data-go="settings"><span>⚙</span>Settings</button>
   </nav>
