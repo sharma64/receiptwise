@@ -1,6 +1,6 @@
 {
-  "name": "SparkKit Receipts",
-  "short_name": "Receipts",
+  "name": "ReceiptWise",
+  "short_name": "ReceiptWise",
   "description": "Photograph receipts, extract the details with AI, and organise work expenses on-device.",
   "start_url": "./index.html",
   "scope": "./",

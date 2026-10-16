@@ -3,3 +3,9 @@ __pycache__/
 *.py[cod]
 *.sqlite3
 *.sqlite3-*
+*.sqlite3.backup-*
+.env
+.env.*
+*.log
+receipts-export*.csv
+.playwright-cli/

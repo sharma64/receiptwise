@@ -3,7 +3,9 @@
 // ---- helpers ----------------------------------------------------
 const $ = (id) => document.getElementById(id);
 const num = (id) => {
-  const v = parseFloat($(id).value.replace(/,/g, '').trim());
+  const raw = $(id).value.replace(/,/g, '').trim();
+  if (!raw) return null;
+  const v = Number(raw);
   return Number.isFinite(v) ? v : null;
 };
 const fmt = (n, d = 2) => {
@@ -28,73 +30,46 @@ document.querySelectorAll('.tab').forEach((tab) => {
 });
 
 // ---- Ohm's law / power wheel ------------------------------------
+const ohmInputs = ['ohm-v', 'ohm-i', 'ohm-r', 'ohm-p'];
+ohmInputs.forEach((id) => $(id).addEventListener('input', () => delete $(id).dataset.derived));
+
 function calcOhms() {
-  let V = num('ohm-v'), I = num('ohm-i'), R = num('ohm-r'), P = num('ohm-p');
-  const known = [V, I, R, P].filter((x) => x !== null).length;
-  if (known < 2) return show('ohm-result', 'Enter any two values.', 'bad');
-
-  // Derive V & I first from whatever pair is given, then the rest.
-  for (let pass = 0; pass < 3; pass++) {
-    if (V === null && I !== null && R !== null) V = I * R;
-    if (V === null && P !== null && I !== null) V = P / I;
-    if (V === null && P !== null && R !== null) V = Math.sqrt(P * R);
-    if (I === null && V !== null && R !== null) I = V / R;
-    if (I === null && P !== null && V !== null) I = P / V;
-    if (I === null && P !== null && R !== null) I = Math.sqrt(P / R);
-    if (R === null && V !== null && I !== null) R = V / I;
-    if (P === null && V !== null && I !== null) P = V * I;
-  }
-  if ([V, I, R, P].some((x) => x === null || !Number.isFinite(x)))
-    return show('ohm-result', 'That combination can’t be solved — check your inputs.', 'bad');
-
-  $('ohm-v').value = fmt(V, 3);
-  $('ohm-i').value = fmt(I, 3);
-  $('ohm-r').value = fmt(R, 3);
-  $('ohm-p').value = fmt(P, 3);
+  const entered = {
+    V: $('ohm-v').dataset.derived ? null : num('ohm-v'),
+    I: $('ohm-i').dataset.derived ? null : num('ohm-i'),
+    R: $('ohm-r').dataset.derived ? null : num('ohm-r'),
+    P: $('ohm-p').dataset.derived ? null : num('ohm-p'),
+  };
+  const result = SparkitCalculators.solveOhms(entered);
+  if (!result.ok) return show('ohm-result', result.message, 'bad');
+  const values = { V: ['ohm-v', result.V], I: ['ohm-i', result.I], R: ['ohm-r', result.R], P: ['ohm-p', result.P] };
+  Object.entries(values).forEach(([key, [id, value]]) => {
+    $(id).value = fmt(value, 3);
+    if (entered[key] === null) $(id).dataset.derived = 'true';
+    else delete $(id).dataset.derived;
+  });
   show('ohm-result',
-    `<b>${fmt(V, 2)} V</b> · <b>${fmt(I, 3)} A</b> · <b>${fmt(R, 2)} Ω</b> · <b>${fmt(P, 2)} W</b>`,
+    `<b>${fmt(result.V, 2)} V</b> · <b>${fmt(result.I, 3)} A</b> · <b>${fmt(result.R, 2)} Ω</b> · <b>${fmt(result.P, 2)} W</b>`,
     'ok');
 }
 
 // ---- Voltage drop solver (any 3 -> 4th) -------------------------
 function calcVdrop() {
   const solveFor = $('vd-solve').value;
-  const vd = num('vd-vd'), I = num('vd-i'), L = num('vd-l'), k = num('vd-k');
-  const nominal = num('vd-nominal');
-  const limitPct = num('vd-limit');
-
-  let result, label, unit;
-  if (solveFor === 'vd') {
-    if (I === null || L === null || k === null) return need('vd-result');
-    result = (L * I * k) / 1000; label = 'Voltage drop'; unit = 'V';
-    $('vd-vd').value = fmt(result, 2);
-  } else if (solveFor === 'i') {
-    if (vd === null || L === null || k === null || L * k === 0) return need('vd-result');
-    result = (vd * 1000) / (L * k); label = 'Current'; unit = 'A';
-    $('vd-i').value = fmt(result, 2);
-  } else if (solveFor === 'l') {
-    if (vd === null || I === null || k === null || I * k === 0) return need('vd-result');
-    result = (vd * 1000) / (I * k); label = 'Route length'; unit = 'm';
-    $('vd-l').value = fmt(result, 2);
-  } else {
-    if (vd === null || I === null || L === null || I * L === 0) return need('vd-result');
-    result = (vd * 1000) / (I * L); label = 'Required mV/A/m'; unit = 'mV/A/m';
-    $('vd-k').value = fmt(result, 3);
-  }
-
-  // Drop voltage available for a % check (either the solved one or the entered one)
-  const dropV = solveFor === 'vd' ? result : vd;
-  let extra = '';
-  if (dropV !== null && nominal) {
-    const pct = (dropV / nominal) * 100;
-    const pass = limitPct === null || pct <= limitPct;
-    extra = `\nDrop = ${fmt(pct, 2)}% of ${fmt(nominal, 0)}V — ` +
-      (pass ? `<span class="tag-ok">within ${fmt(limitPct, 1)}%</span>` : `<span class="tag-bad">exceeds ${fmt(limitPct, 1)}%</span>`);
-    return show('vd-result', `<b>${label}: ${fmt(result, 2)} ${unit}</b>${extra}`, pass ? 'ok' : 'bad');
-  }
-  show('vd-result', `<b>${label}: ${fmt(result, 2)} ${unit}</b>`, 'ok');
+  const result = SparkitCalculators.solveVoltageDrop({
+    solveFor, drop: num('vd-vd'), current: num('vd-i'), length: num('vd-l'),
+    mvPerAmpPerM: num('vd-k'), nominal: num('vd-nominal'), limitPct: num('vd-limit'),
+  });
+  if (!result.ok) return show('vd-result', result.message, 'bad');
+  const output = { vd: ['vd-vd', 'Voltage drop', 'V', 2], i: ['vd-i', 'Current', 'A', 2], l: ['vd-l', 'Route length', 'm', 2], k: ['vd-k', 'Required mV/A/m', 'mV/A/m', 3] }[solveFor];
+  $(output[0]).value = fmt(result.result, output[3]);
+  let extra = result.percentage === null ? '' : `\nDrop = ${fmt(result.percentage, 2)}% of ${fmt(num('vd-nominal'), 0)}V`;
+  if (result.comparison !== null) extra += result.comparison
+    ? ` — <span class="tag-ok">within your ${fmt(num('vd-limit'), 1)}% comparison</span>`
+    : ` — <span class="tag-bad">exceeds your ${fmt(num('vd-limit'), 1)}% comparison</span>`;
+  else if (result.percentage !== null) extra += ' — add a job/standard comparison if needed.';
+  show('vd-result', `<b>${output[1]}: ${fmt(result.result, output[3])} ${output[2]}</b>${extra}`, result.comparison === false ? 'bad' : result.comparison === true ? 'ok' : '');
 }
-function need(id) { show(id, 'Fill the other three fields.', 'bad'); }
 
 // keep nominal voltage in step with phase choice
 $('vd-phase').addEventListener('change', (e) => {
@@ -104,18 +79,14 @@ $('vd-phase').addEventListener('change', (e) => {
 // ---- Three-phase ------------------------------------------------
 function calcThree() {
   const VL = num('tp-vl'), IL = num('tp-il'), pf = num('tp-pf');
-  if (VL === null || IL === null) return show('tp-result', 'Enter line voltage and line current.', 'bad');
-  const root3 = Math.sqrt(3);
-  const Vph = VL / root3;
-  const S = root3 * VL * IL;            // VA
-  $('tp-vph').value = fmt(Vph, 1);
-  if (pf === null) {
-    return show('tp-result', `<b>Apparent power S = ${fmt(S / 1000, 2)} kVA</b>\nPhase voltage = ${fmt(Vph, 1)} V\nAdd a power factor for kW / kVAR.`, 'ok');
+  const result = SparkitCalculators.threePhase({ lineVoltage: VL, lineCurrent: IL, powerFactor: pf });
+  if (!result.ok) return show('tp-result', result.message, 'bad');
+  $('tp-vph').value = fmt(result.phaseVoltage, 1);
+  if (result.real === null) {
+    return show('tp-result', `<b>Apparent power S = ${fmt(result.apparent / 1000, 2)} kVA</b>\nWye phase voltage = ${fmt(result.phaseVoltage, 1)} V\nAdd a power factor for kW / kVAR.`, 'ok');
   }
-  const P = S * pf;                     // W
-  const Q = Math.sqrt(Math.max(S * S - P * P, 0)); // VAR
   show('tp-result',
-    `<b>P = ${fmt(P / 1000, 2)} kW</b> · S = ${fmt(S / 1000, 2)} kVA · Q = ${fmt(Q / 1000, 2)} kVAR\nPhase voltage = ${fmt(Vph, 1)} V · pf ${fmt(pf, 2)}`,
+    `<b>P = ${fmt(result.real / 1000, 2)} kW</b> · S = ${fmt(result.apparent / 1000, 2)} kVA · Q = ${fmt(result.reactive / 1000, 2)} kVAR\nWye phase voltage = ${fmt(result.phaseVoltage, 1)} V · pf ${fmt(pf, 2)}`,
     'ok');
 }
 
@@ -135,40 +106,29 @@ $('cf-add').addEventListener('click', () => addCable());
 addCable(); addCable(); // start with two
 
 function calcConduit() {
-  const ID = num('cf-id');
-  if (ID === null || ID <= 0) return show('cf-result', 'Enter the conduit internal diameter.', 'bad');
   const ds = [...document.querySelectorAll('.cf-d')]
     .map((el) => parseFloat(el.value)).filter((v) => Number.isFinite(v) && v > 0);
-  if (!ds.length) return show('cf-result', 'Add at least one cable diameter.', 'bad');
-
-  const area = (d) => (Math.PI / 4) * d * d;
-  const conduitCSA = area(ID);
-  const cablesCSA = ds.reduce((s, d) => s + area(d), 0);
-  const fill = (cablesCSA / conduitCSA) * 100;
-  const limit = ds.length === 1 ? 53 : ds.length === 2 ? 31 : 40;
-  const pass = fill <= limit;
+  const result = SparkitCalculators.conduitFill({ internalDiameter: num('cf-id'), cableDiameters: ds });
+  if (!result.ok) return show('cf-result', result.message, 'bad');
   show('cf-result',
-    `<b>Fill = ${fmt(fill, 1)}%</b> (${ds.length} cable${ds.length > 1 ? 's' : ''})\nLimit ${limit}% — ` +
-    (pass ? '<span class="tag-ok">OK</span>' : '<span class="tag-bad">over — size up the conduit</span>') +
-    `\nCable CSA ${fmt(cablesCSA, 1)} mm² of ${fmt(conduitCSA, 1)} mm²`,
-    pass ? 'ok' : 'bad');
+    `<b>Geometric fill = ${fmt(result.fillPercent, 1)}%</b> (${ds.length} cable${ds.length > 1 ? 's' : ''})\nCable area ${fmt(result.cableArea, 1)} mm² of conduit area ${fmt(result.conduitArea, 1)} mm²\nCheck the applicable enclosure/space-factor rule before using this result.`,
+    '');
 }
 
 // ---- Deratings --------------------------------------------------
 function calcDerate() {
-  const base = num('dr-base');
-  const load = num('dr-load');
+  const base = num('dr-base'), load = num('dr-load');
   const ka = num('dr-ka') ?? 1, kg = num('dr-kg') ?? 1, ki = num('dr-ki') ?? 1, ko = num('dr-ko') ?? 1;
-  if (base === null) return show('dr-result', 'Enter the base current-carrying capacity.', 'bad');
-  const derated = base * ka * kg * ki * ko;
-  let line = `<b>Derated capacity = ${fmt(derated, 1)} A</b>\nBase ${fmt(base, 1)} A × ${fmt(ka, 2)} × ${fmt(kg, 2)} × ${fmt(ki, 2)} × ${fmt(ko, 2)}`;
+  const result = SparkitCalculators.derating({ base, load, factors: [ka, kg, ki, ko] });
+  if (!result.ok) return show('dr-result', result.message, 'bad');
+  let line = `<b>Corrected capacity = ${fmt(result.capacity, 1)} A</b>\nBase ${fmt(base, 1)} A × ${fmt(ka, 2)} × ${fmt(kg, 2)} × ${fmt(ki, 2)} × ${fmt(ko, 2)}`;
   if (load !== null) {
-    const pass = derated >= load;
     line += `\nDesign load ${fmt(load, 1)} A — ` +
-      (pass ? '<span class="tag-ok">cable OK</span>' : '<span class="tag-bad">undersized — size up</span>');
-    return show('dr-result', line, pass ? 'ok' : 'bad');
+      (result.comparison ? '<span class="tag-ok">capacity is above this load</span>' : '<span class="tag-bad">capacity is below this load</span>') +
+      '\nThis is a numerical comparison; confirm cable selection requirements.';
+    return show('dr-result', line, result.comparison ? 'ok' : 'bad');
   }
-  show('dr-result', line, 'ok');
+  show('dr-result', line, '');
 }
 
 // ---- wiring buttons ---------------------------------------------
@@ -190,6 +150,7 @@ document.querySelectorAll('[data-clear]').forEach((b) =>
       if (!el) return;
       if (el.classList.contains('result')) { el.innerHTML = ''; el.className = 'result'; }
       else el.value = '';
+      delete el.dataset?.derived;
     });
     if (b.dataset.clear === 'derate') ['dr-ka', 'dr-kg', 'dr-ki', 'dr-ko'].forEach((id) => ($(id).value = '1.00'));
   }));

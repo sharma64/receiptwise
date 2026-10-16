@@ -1,4 +1,4 @@
-# SparkKit — Apprentice Toolkit
+# Sparkit — Apprentice Toolkit
 
 A mobile-first toolkit for electrical apprentices: trade calculators + a rules quick-reference.
 Built for **AS/NZS** standards (230V single / 400V three-phase). *(Working name — easy to rename.)*
@@ -33,14 +33,16 @@ python3 -m http.server 5173
 
 Installable to a phone home screen and works offline (service worker caches the app shell).
 
-## Receipts (Phase 2 — in progress)
+## ReceiptWise
 
-Receipt capture lives in its own workspace: [`receipts/`](receipts/README.md).
+Receipt capture lives in its own workspace: [`receipts/`](receipts/README.md) and
+is branded **ReceiptWise**.
 Photograph a receipt, Claude extracts the details (merchant, date, total, GST,
 category), and everything is stored on-device with monthly totals and CSV export.
 
 ## Roadmap
 
-- **Phase 2:** job invoicing + receipt capture *(receipt capture started — see `receipts/`)*.
+- Source-backed regulations lookup with edition, jurisdiction and review dates.
+- Worked examples and saved calculator history.
 - Max-demand calculator and cable current-capacity tables (needs verified AS/NZS 3008 / 3000 table data).
 - Native wrapper once the web version feels right.

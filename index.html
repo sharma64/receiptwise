@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#0f1115" />
-  <title>SparkKit — Apprentice Toolkit</title>
+  <title>Sparkit — Apprentice Toolkit</title>
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="icon" href="icons/icon.svg" type="image/svg+xml" />
   <link rel="apple-touch-icon" href="icons/icon.svg" />
@@ -14,7 +14,7 @@
   <header class="topbar">
     <div class="brand">
       <span class="bolt" aria-hidden="true">⚡</span>
-      <span>SparkKit</span>
+      <span>Sparkit</span>
     </div>
     <span class="region" title="Australian / New Zealand standards">AS/NZS · 230/400V</span>
   </header>
@@ -97,7 +97,7 @@
           </label>
         </div>
         <label class="full">Max drop allowed <span>%</span>
-          <input id="vd-limit" type="text" inputmode="decimal" value="5" />
+          <input id="vd-limit" type="text" inputmode="decimal" placeholder="from job / current standard" />
         </label>
         <div class="row">
           <button class="btn" data-calc="vdrop">Calculate</button>
@@ -105,13 +105,13 @@
         </div>
         <p class="result" id="vd-result" aria-live="polite"></p>
       </div>
-      <p class="clause">Vd = (L × I × mV/A/m) ÷ 1000 &nbsp;·&nbsp; limit AS/NZS 3000 Cl 3.6.2 (5%). Use the single- or three-phase mV/A/m value to match the phase selected.</p>
+      <p class="clause">Vd = (L × I × mV/A/m) ÷ 1000. Use the table value and any comparison limit that apply to the installation; this tool does not determine compliance.</p>
     </section>
 
     <!-- THREE PHASE -->
     <section class="screen" id="three" data-screen hidden>
       <h1>Three-Phase Power</h1>
-      <p class="sub">Balanced load. Enter line voltage, line current &amp; power factor.</p>
+      <p class="sub">Balanced three-phase load. Phase voltage shown is for a wye (star) connection.</p>
       <div class="card">
         <div class="grid2">
           <label>Line voltage V<sub>L</sub> <span>V</span>
@@ -154,7 +154,7 @@
         </div>
         <p class="result" id="cf-result" aria-live="polite"></p>
       </div>
-      <p class="clause">Fill % = Σ cable CSA ÷ conduit CSA. Common limits: 1 cable 53%, 2 cables 31%, 3+ cables 40%. Verify space factors in AS/NZS 3000 Section 3.</p>
+      <p class="clause">Geometric fill % = Σ cable cross-sectional area ÷ conduit internal area. Verify the applicable enclosure or space-factor rule for the installation.</p>
 
       <h2 class="section-h">Cable Deratings</h2>
       <p class="sub">Start from the table current-carrying capacity, then apply correction factors.</p>
@@ -179,14 +179,7 @@
             <input id="dr-ko" type="text" inputmode="decimal" value="1.00" />
           </label>
         </div>
-        <details class="hint">
-          <summary>Typical factors (indicative — confirm against AS/NZS 3008)</summary>
-          <ul>
-            <li><b>Ambient:</b> ~1.0 at reference temp; falls as ambient rises (e.g. ~0.88 hotter, lower in roof spaces).</li>
-            <li><b>Grouping (bunched):</b> 2 ckts ≈ 0.80, 3 ≈ 0.70, 4 ≈ 0.65, 6 ≈ 0.57.</li>
-            <li><b>Thermal insulation:</b> one side ≈ 0.75; fully surrounded ≈ 0.50.</li>
-          </ul>
-        </details>
+        <p class="clause">Enter correction factors from the applicable current standard and installation method. The result is a numerical comparison, not cable-selection approval.</p>
         <div class="row">
           <button class="btn" data-calc="derate">Calculate</button>
           <button class="btn ghost" data-clear="derate">Clear</button>
@@ -199,7 +192,13 @@
     <!-- RULES -->
     <section class="screen" id="rules" data-screen hidden>
       <h1>Rules Reference</h1>
-      <p class="sub">Quick cards. Always verify against the current standard.</p>
+      <p class="sub">Quick signposts. Always verify against the current standard and local regulator guidance.</p>
+
+      <div class="card rulecard">
+        <h3>Reference status</h3>
+        <p>Australia-focused source links checked 16 October 2026: <a href="https://www.standards.org.au/flagship-projects/wiring-rules" target="_blank" rel="noopener">AS/NZS 3000 Wiring Rules</a>, <a href="https://www.standards.org.au/standards-catalogue/standard-details?designation=as-nzs-3008-1-1-2025" target="_blank" rel="noopener">AS/NZS 3008.1.1:2025 cable selection</a>, and <a href="https://www.nsw.gov.au/housing-and-construction/compliance-and-regulation/electricians/electrical-standards-rules-and-notes" target="_blank" rel="noopener">NSW electrical rules and notes</a>.</p>
+        <p>This is a study aid, not a live compliance service. Check the applicable edition, amendments and jurisdiction before work starts.</p>
+      </div>
 
       <div class="card rulecard">
         <h3>Cable colours (AU)</h3>
@@ -213,15 +212,15 @@
       </div>
       <div class="card rulecard">
         <h3>RCD protection (AS/NZS 3000)</h3>
-        <p>≤30mA RCD required on socket-outlet and lighting final subcircuits in domestic installations. Verify exemptions and circuit grouping limits.</p>
+        <p>Check the current AS/NZS 3000 requirements, exemptions and circuit grouping limits for the installation.</p>
       </div>
       <div class="card rulecard">
-        <h3>Disconnection times (typical)</h3>
-        <p>Final subcircuits ≤63A (socket-outlets): 0.4s. Distribution / fixed ≤32A: up to 5s. Confirm earthing system and Table values.</p>
+        <h3>Disconnection times</h3>
+        <p>Use the current standard’s table for the circuit type and earthing arrangement.</p>
       </div>
       <div class="card rulecard">
-        <h3>Voltage drop limit</h3>
-        <p>Max 5% from point of supply to any point in the installation (AS/NZS 3000 Cl 3.6.2).</p>
+        <h3>Voltage drop</h3>
+        <p>Confirm the applicable limit and installation scope in the current standard before relying on a calculated percentage.</p>
       </div>
     </section>
   </main>
@@ -236,6 +235,7 @@
 
   <p class="disclaimer">Study &amp; field aid only. Verify every result against current AS/NZS standards and your licensed supervisor before relying on it.</p>
 
+  <script src="calculators.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
