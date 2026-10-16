@@ -86,6 +86,14 @@ const getServer = () => {
 const pendingDeletes = () => JSON.parse(localStorage.getItem(SRV_DELETES) || '[]');
 const setPendingDeletes = (ids) => localStorage.setItem(SRV_DELETES, JSON.stringify(ids));
 const queueDelete = (id) => setPendingDeletes([...new Set([...pendingDeletes(), id])]);
+const hasLocalSyncState = async () => (await dbAll()).length > 0 || pendingDeletes().length > 0;
+const isChangingServer = (url) => url !== (localStorage.getItem(SRV_URL) || DEFAULT_SERVER_URL).replace(/\/+$/, '');
+
+async function canUseServer(url, statusId) {
+  if (!isChangingServer(url) || !await hasLocalSyncState()) return true;
+  show(statusId, 'This device still has cached receipts or queued deletions. Export or clear that local data before changing server.', 'bad');
+  return false;
+}
 
 async function serverFetch(path, opts = {}) {
   const srv = getServer();
@@ -125,23 +133,30 @@ async function refreshLoginState() {
 // The server (fed by Ledger) is the source of truth for anything not
 // locally dirty; local thumbnails are kept when the server has none.
 let syncing = false;
+let syncQueued = false;
 async function syncNow() {
-  if (!getServer() || syncing) return false;
+  if (!getServer()) return false;
+  if (syncing) { syncQueued = true; return false; }
   syncing = true;
   try {
     for (const r of (await dbAll()).filter((x) => x._dirty)) {
-      const { _dirty, ...rec } = r;
+      const sentRevision = ReceiptWiseSync.revisionOf(r);
+      const rec = ReceiptWiseSync.stripLocalMetadata(r);
       const { receipt } = await serverFetch('/receipts/upsert', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(rec),
       });
-      await dbPut({ ...receipt, thumb: receipt.thumb || rec.thumb || '' });
+      const current = await dbGet(r.id);
+      if (ReceiptWiseSync.shouldApplyResponse(current, sentRevision)) {
+        await dbPut({ ...receipt, thumb: receipt.thumb || rec.thumb || '', _rev: sentRevision });
+      }
     }
-    for (const id of pendingDeletes()) {
+    const deletes = pendingDeletes();
+    for (const id of deletes) {
       await serverFetch(`/receipts/${encodeURIComponent(id)}`, { method: 'DELETE' });
     }
-    setPendingDeletes([]);
+    setPendingDeletes(ReceiptWiseSync.removeCompletedDeletes(pendingDeletes(), deletes));
 
     const { receipts } = await serverFetch('/receipts');
     const localById = new Map((await dbAll()).map((r) => [r.id, r]));
@@ -158,6 +173,10 @@ async function syncNow() {
     return true;
   } finally {
     syncing = false;
+    if (syncQueued) {
+      syncQueued = false;
+      queueMicrotask(() => syncNow().catch(() => {}));
+    }
   }
 }
 
@@ -168,6 +187,7 @@ $('btn-save-server').addEventListener('click', async () => {
   const url = ($('set-server').value.trim() || DEFAULT_SERVER_URL).replace(/\/+$/, '');
   const token = $('set-token').value.trim();
   if (!url) return show('server-status', 'Enter the server URL.', 'bad');
+  if (!await canUseServer(url, 'server-status')) return;
   localStorage.setItem(SRV_URL, url);
   if (token) localStorage.setItem(SRV_TOKEN, token);
   else localStorage.removeItem(SRV_TOKEN);
@@ -176,7 +196,7 @@ $('btn-save-server').addEventListener('click', async () => {
   try {
     // Mark everything local for push so nothing is lost on first sync.
     for (const r of await dbAll()) {
-      if (!r._dirty) { r._dirty = true; await dbPut(r); }
+      if (!r._dirty) await dbPut(ReceiptWiseSync.markDirty(r));
     }
     await syncNow();
     show('server-status', 'Connected — synced.', 'ok');
@@ -190,6 +210,7 @@ $('btn-login-server').addEventListener('click', async () => {
   const username = $('set-username').value.trim();
   const password = $('set-password').value;
   if (!username || !password) return show('login-status', 'Enter username and password.', 'bad');
+  if (!await canUseServer(url, 'login-status')) return;
   localStorage.setItem(SRV_URL, url);
   localStorage.setItem('receipts.username', username);
   localStorage.removeItem(SRV_TOKEN);
@@ -256,6 +277,9 @@ const dbPut = (r) => new Promise((res, rej) => {
 });
 const dbAll = () => new Promise((res, rej) => {
   const q = store('readonly').getAll(); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error);
+});
+const dbGet = (id) => new Promise((res, rej) => {
+  const q = store('readonly').get(id); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error);
 });
 const dbDelete = (id) => new Promise((res, rej) => {
   const q = store('readwrite').delete(id); q.onsuccess = () => res(); q.onerror = () => rej(q.error);
@@ -403,7 +427,7 @@ $('file-input').addEventListener('change', async (e) => {
         failed++;
         continue;
       }
-      const record = {
+      const record = ReceiptWiseSync.markDirty({
         id: crypto.randomUUID(),
         added: new Date().toISOString(),
         thumb,
@@ -416,8 +440,7 @@ $('file-input').addEventListener('change', async (e) => {
         payment_method: data.payment_method,
         items: data.items || [],
         notes: data.notes,
-        _dirty: true,
-      };
+      });
       await dbPut(record);
       row.classList.add('done');
       row.querySelector('.q-name').textContent = record.merchant;
@@ -526,8 +549,8 @@ $('d-save').addEventListener('click', async () => {
   Object.assign(editing, {
     category: $('d-cat').value,
     notes: $('d-notes').value.trim() || null,
-    _dirty: true,
   });
+  Object.assign(editing, ReceiptWiseSync.markDirty(editing));
   await dbPut(editing);
   $('detail').close();
   renderList();
