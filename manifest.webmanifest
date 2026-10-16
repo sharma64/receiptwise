@@ -1,6 +1,6 @@
 {
-  "name": "SparkKit — Apprentice Toolkit",
-  "short_name": "SparkKit",
+  "name": "Sparkit — Apprentice Toolkit",
+  "short_name": "Sparkit",
   "description": "Electrical calculators and rules reference for AU/NZ apprentices.",
   "start_url": "./index.html",
   "display": "standalone",

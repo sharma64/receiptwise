@@ -1,4 +1,4 @@
-# SparkKit Receipts — snap, extract, organise
+# ReceiptWise — snap, extract, organise
 
 Receipt capture. Take a photo of a receipt, a connected server (running
 `server.py`, backed by Claude) reads it and extracts structured data —
